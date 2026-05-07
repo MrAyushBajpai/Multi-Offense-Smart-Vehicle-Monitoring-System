@@ -10,6 +10,8 @@ Detects and classifies traffic signals:
 Also detects the traffic light object itself (COCO class 9).
 
 Reads video clips from /Input folder and saves annotated output videos.
+Real-time preview: a window shows annotated frames as they are processed.
+Press  Q  at any time to stop early.
 """
 
 import cv2
@@ -27,21 +29,18 @@ INPUT_FOLDER  = "Input"
 OUTPUT_FOLDER = "Output"
 DEFAULT_VIDEO = "Input/traffic_light.mp4"
 
-# YOLO model
-MODEL_WEIGHTS = "yolo11n.pt"
-
+MODEL_WEIGHTS        = "yolo11n.pt"
 CONFIDENCE_THRESHOLD = 0.40
 IOU_THRESHOLD        = 0.45
 DEVICE               = ""
 
-SHOW_CONF            = True
-LINE_WIDTH           = 2
+SHOW_CONF  = True
+LINE_WIDTH = 2
 
 # COCO class 9 = traffic light
 TRAFFIC_LIGHT_CLASS = 9
 
 # HSV colour ranges for red / yellow / green detection
-# Red wraps around 0°, so we need two ranges
 COLOR_RANGES = {
     "Red": [
         (np.array([0,   120,  70]),  np.array([10,  255, 255])),
@@ -55,13 +54,18 @@ COLOR_RANGES = {
     ],
 }
 
-# Overlay colours (BGR) per signal state
 SIGNAL_COLORS = {
     "Red":     (0,   0,   255),
     "Yellow":  (0,   215, 255),
-    "Green":   (0,   200,  0),
+    "Green":   (0,   200,   0),
     "Unknown": (180, 180, 180),
 }
+
+# ── Preview window ─────────────────────────────────────────────────────────────
+PREVIEW_ENABLED     = True
+PREVIEW_WINDOW_NAME = "YOLO Traffic Signal Detection — press Q to quit"
+PREVIEW_MAX_WIDTH   = 1280
+PREVIEW_WAIT_MS     = 1
 
 
 # ─────────────────────────────────────────
@@ -74,7 +78,6 @@ SUPPORTED_EXTENSIONS = {
 
 
 def get_video_files(folder: str) -> list[Path]:
-    """Return all supported video files found in folder."""
     folder_path = Path(folder)
     if not folder_path.exists():
         raise FileNotFoundError(f"Input folder not found: {folder}")
@@ -85,7 +88,6 @@ def get_video_files(folder: str) -> list[Path]:
 
 
 def load_model(weights: str) -> YOLO:
-    """Load YOLO model with fallback support."""
     try:
         model = YOLO(weights)
         print(f"[INFO] Loaded model: {weights}")
@@ -97,6 +99,20 @@ def load_model(weights: str) -> YOLO:
         return YOLO(fallback)
 
 
+def resize_for_preview(frame, max_width: int):
+    """Proportionally down-scale a frame so it fits within max_width."""
+    h, w = frame.shape[:2]
+    if w <= max_width:
+        return frame
+    scale = max_width / w
+    return cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_LINEAR)
+
+
+def open_preview_window(name: str) -> None:
+    cv2.namedWindow(name, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
+    cv2.setWindowTitle(name, name)
+
+
 def classify_signal_color(roi: np.ndarray) -> str:
     """
     Determine traffic-light state (Red / Yellow / Green / Unknown)
@@ -106,7 +122,6 @@ def classify_signal_color(roi: np.ndarray) -> str:
         return "Unknown"
 
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-
     pixel_counts = {}
 
     for color_name, ranges in COLOR_RANGES.items():
@@ -115,10 +130,9 @@ def classify_signal_color(roi: np.ndarray) -> str:
             mask |= cv2.inRange(hsv, lo, hi)
         pixel_counts[color_name] = int(np.sum(mask > 0))
 
-    best_color = max(pixel_counts, key=pixel_counts.get)
-
-    # Require at least 1 % of the ROI to be the dominant colour
+    best_color   = max(pixel_counts, key=pixel_counts.get)
     total_pixels = roi.shape[0] * roi.shape[1]
+
     if total_pixels == 0 or pixel_counts[best_color] < total_pixels * 0.01:
         return "Unknown"
 
@@ -130,19 +144,24 @@ def draw_signal_counts(frame, counts: dict) -> None:
     y = 30
     for label, count in counts.items():
         color = SIGNAL_COLORS.get(label, (255, 255, 255))
-        text  = f"{label}: {count}"
         cv2.putText(
-            frame, text, (10, y),
+            frame, f"{label}: {count}", (10, y),
             cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA,
         )
         y += 30
 
 
-def process_video(model: YOLO, video_path: Path, output_folder: str) -> None:
-    """Run traffic-signal detection on a video and save annotated output."""
-
+def process_video(
+    model: YOLO,
+    video_path: Path,
+    output_folder: str,
+    preview: bool = PREVIEW_ENABLED,
+) -> None:
+    """Run traffic-signal detection on a video, show live preview, and save output."""
     print(f"\n{'='*60}")
     print(f"[INFO] Processing: {video_path.name}")
+    if preview:
+        print(f"[INFO] Preview window open — press  Q  to stop early")
     print(f"{'='*60}")
 
     cap = cv2.VideoCapture(str(video_path))
@@ -154,26 +173,19 @@ def process_video(model: YOLO, video_path: Path, output_folder: str) -> None:
     width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total  = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
-    print(
-        f"[INFO] Resolution: {width}x{height}  |  "
-        f"FPS: {fps:.1f}  |  Frames: {total}"
-    )
+    print(f"[INFO] Resolution: {width}x{height}  |  FPS: {fps:.1f}  |  Frames: {total}")
 
     os.makedirs(output_folder, exist_ok=True)
+    out_path = Path(output_folder) / f"{video_path.stem}_signals{video_path.suffix}"
+    fourcc   = cv2.VideoWriter_fourcc(*"mp4v")
+    writer   = cv2.VideoWriter(str(out_path), fourcc, fps, (width, height))
 
-    out_path = (
-        Path(output_folder) /
-        f"{video_path.stem}_signals{video_path.suffix}"
-    )
+    if preview:
+        open_preview_window(PREVIEW_WINDOW_NAME)
 
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(str(out_path), fourcc, fps, (width, height))
-
-    frame_idx  = 0
-    total_dets = 0
-
-    # Running totals across the whole video
+    frame_idx     = 0
+    total_dets    = 0
+    stopped_early = False
     global_counts = {"Red": 0, "Yellow": 0, "Green": 0, "Unknown": 0}
 
     while True:
@@ -181,6 +193,7 @@ def process_video(model: YOLO, video_path: Path, output_folder: str) -> None:
         if not ret:
             break
 
+        # ── Inference ──────────────────────────────────────────────
         results = model(
             frame,
             conf=CONFIDENCE_THRESHOLD,
@@ -189,25 +202,22 @@ def process_video(model: YOLO, video_path: Path, output_folder: str) -> None:
             verbose=False,
         )
 
-        result    = results[0]
-        annotated = frame.copy()
-
+        annotated    = frame.copy()
         frame_counts = {"Red": 0, "Yellow": 0, "Green": 0, "Unknown": 0}
 
-        for box in result.boxes:
+        # ── Process detections ─────────────────────────────────────
+        for box in results[0].boxes:
             cls_id = int(box.cls[0])
-
             if cls_id != TRAFFIC_LIGHT_CLASS:
                 continue
 
-            confidence = float(box.conf[0])
+            confidence   = float(box.conf[0])
             x1, y1, x2, y2 = map(int, box.xyxy[0])
 
-            # Clamp coordinates to frame boundaries
-            x1c = max(0, x1); y1c = max(0, y1)
-            x2c = min(width,  x2); y2c = min(height, y2)
+            x1c, y1c = max(0, x1), max(0, y1)
+            x2c, y2c = min(width, x2), min(height, y2)
 
-            roi         = frame[y1c:y2c, x1c:x2c]
+            roi          = frame[y1c:y2c, x1c:x2c]
             signal_state = classify_signal_color(roi)
 
             frame_counts[signal_state]  += 1
@@ -216,32 +226,21 @@ def process_video(model: YOLO, video_path: Path, output_folder: str) -> None:
 
             box_color = SIGNAL_COLORS[signal_state]
 
-            # Bounding box
             cv2.rectangle(annotated, (x1, y1), (x2, y2), box_color, LINE_WIDTH)
 
-            # Label
             label = f"Signal:{signal_state}"
             if SHOW_CONF:
                 label += f" {confidence:.2f}"
 
-            (text_w, text_h), _ = cv2.getTextSize(
-                label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2,
-            )
-
-            cv2.rectangle(
-                annotated,
-                (x1, y1 - 30),
-                (x1 + text_w + 10, y1),
-                box_color,
-                -1,
-            )
-
+            (text_w, _), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+            cv2.rectangle(annotated, (x1, y1 - 30), (x1 + text_w + 10, y1), box_color, -1)
             cv2.putText(
                 annotated, label, (x1 + 5, y1 - 8),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2, cv2.LINE_AA,
             )
 
-        # ── Overlay info ───────────────────────────────────────────
+        # ── Overlays ───────────────────────────────────────────────
+        draw_signal_counts(annotated, frame_counts)
         cv2.putText(
             annotated,
             f"Frame {frame_idx+1}/{total}",
@@ -249,75 +248,77 @@ def process_video(model: YOLO, video_path: Path, output_folder: str) -> None:
             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA,
         )
 
-        draw_signal_counts(annotated, frame_counts)
-
+        # ── Write to file ──────────────────────────────────────────
         writer.write(annotated)
 
-        frame_idx += 1
+        # ── Live preview ───────────────────────────────────────────
+        if preview:
+            cv2.imshow(PREVIEW_WINDOW_NAME, resize_for_preview(annotated, PREVIEW_MAX_WIDTH))
+            key = cv2.waitKey(PREVIEW_WAIT_MS) & 0xFF
+            if key in (ord("q"), ord("Q")):
+                print("\n[INFO] User pressed Q — stopping early.")
+                stopped_early = True
+                break
+            if cv2.getWindowProperty(PREVIEW_WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
+                print("\n[INFO] Preview window closed — stopping early.")
+                stopped_early = True
+                break
 
+        frame_idx += 1
         if frame_idx % 100 == 0:
-            print(
-                f"  → Frame {frame_idx}/{total} processed "
-                f"(signal detections so far: {total_dets})"
-            )
+            print(f"  → Frame {frame_idx}/{total}  (signal dets so far: {total_dets})")
 
     cap.release()
     writer.release()
 
-    print(
-        f"[INFO] Done. "
-        f"{frame_idx} frames processed, "
-        f"{total_dets} signal detections."
-    )
+    if preview:
+        cv2.destroyWindow(PREVIEW_WINDOW_NAME)
+
+    status = "stopped early" if stopped_early else "complete"
+    print(f"[INFO] Done ({status}). {frame_idx} frames, {total_dets} signal detections.")
     print(f"[INFO] Output saved to: {out_path}")
 
-    # ── Summary ────────────────────────────────────────────────────
     print("\n  Traffic Signal Summary (whole video):")
-    for state, count in global_counts.items():
-        if count > 0:
-            print(f"    {state:<10} {count:>6} detections")
-    if total_dets == 0:
+    found = any(v > 0 for v in global_counts.values())
+    if found:
+        for state, count in global_counts.items():
+            if count > 0:
+                print(f"    {state:<10} {count:>6} detections")
+    else:
         print("    No traffic signals detected.")
 
 
 def print_detection_summary(model: YOLO, video_path: Path) -> None:
-    """Print total traffic-signal colour counts for a video."""
-
     print(f"\n[INFO] Generating signal summary for: {video_path.name}")
 
-    cap = cv2.VideoCapture(str(video_path))
-
+    cap    = cv2.VideoCapture(str(video_path))
     width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
     counts = {"Red": 0, "Yellow": 0, "Green": 0, "Unknown": 0}
 
     while True:
         ret, frame = cap.read()
         if not ret:
             break
-
         results = model(frame, conf=CONFIDENCE_THRESHOLD, verbose=False)
-
         for box in results[0].boxes:
             cls_id = int(box.cls[0])
             if cls_id != TRAFFIC_LIGHT_CLASS:
                 continue
-
             x1, y1, x2, y2 = map(int, box.xyxy[0])
-            roi = frame[max(0, y1):min(height, y2), max(0, x1):min(width, x2)]
+            roi   = frame[max(0, y1):min(height, y2), max(0, x1):min(width, x2)]
             state = classify_signal_color(roi)
             counts[state] += 1
 
     cap.release()
 
     print("\n  Traffic Signal Detection Summary:")
-    found = False
-    for state, count in counts.items():
-        if count > 0:
-            found = True
-            print(f"    {state:<10} {count:>6}")
-    if not found:
+    found = any(v > 0 for v in counts.values())
+    if found:
+        for state, count in counts.items():
+            if count > 0:
+                print(f"    {state:<10} {count:>6}")
+    else:
         print("    No traffic signals detected.")
 
 
@@ -325,37 +326,33 @@ def print_detection_summary(model: YOLO, video_path: Path) -> None:
 # Entry point
 # ─────────────────────────────────────────
 def main():
-
-    global CONFIDENCE_THRESHOLD, MODEL_WEIGHTS
+    global CONFIDENCE_THRESHOLD, MODEL_WEIGHTS, PREVIEW_ENABLED
 
     parser = argparse.ArgumentParser(
-        description="YOLO Traffic Signal Detection on video files."
+        description="YOLO Traffic Signal Detection on video files with live preview."
     )
-
     parser.add_argument(
-        "--input",
-        default=DEFAULT_VIDEO,
+        "--input", default=DEFAULT_VIDEO,
         help=f"Path to video OR folder of videos. Default: '{DEFAULT_VIDEO}'",
     )
     parser.add_argument(
-        "--output",
-        default=OUTPUT_FOLDER,
+        "--output", default=OUTPUT_FOLDER,
         help=f"Output folder (default: {OUTPUT_FOLDER})",
     )
     parser.add_argument(
-        "--model",
-        default=MODEL_WEIGHTS,
+        "--model", default=MODEL_WEIGHTS,
         help=f"YOLO weights file (default: {MODEL_WEIGHTS})",
     )
     parser.add_argument(
-        "--conf",
-        type=float,
-        default=CONFIDENCE_THRESHOLD,
+        "--conf", type=float, default=CONFIDENCE_THRESHOLD,
         help=f"Confidence threshold (default: {CONFIDENCE_THRESHOLD})",
     )
     parser.add_argument(
-        "--summary",
-        action="store_true",
+        "--no-preview", action="store_true",
+        help="Disable the real-time preview window (headless / server mode)",
+    )
+    parser.add_argument(
+        "--summary", action="store_true",
         help="Print traffic signal detection summary after processing.",
     )
 
@@ -363,11 +360,11 @@ def main():
 
     CONFIDENCE_THRESHOLD = args.conf
     MODEL_WEIGHTS        = args.model
+    PREVIEW_ENABLED      = not args.no_preview
 
     model = load_model(args.model)
 
     input_path = Path(args.input)
-
     if input_path.is_dir():
         videos = get_video_files(str(input_path))
         if not videos:
@@ -381,7 +378,7 @@ def main():
         videos = [input_path]
 
     for video in videos:
-        process_video(model, video, args.output)
+        process_video(model, video, args.output, preview=PREVIEW_ENABLED)
         if args.summary:
             print_detection_summary(model, video)
 

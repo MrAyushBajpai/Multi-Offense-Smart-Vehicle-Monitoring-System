@@ -3,4 +3,4 @@ Output
 yolo26m.pt
 seatbelt_dataset
 Input
-record.json
+*.json

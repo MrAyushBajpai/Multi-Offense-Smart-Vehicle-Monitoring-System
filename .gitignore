@@ -1,6 +1,6 @@
 venv
 Output
 yolo26m.pt
-seatbelt_dataset
+datasets
 Input
 *.json
